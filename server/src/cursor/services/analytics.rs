@@ -14,6 +14,7 @@ use crate::{api::cursor::proxy, Error, Result};
 
 pub const BOOTSTRAP_STATSIG_PATH: &str = "/aiserver.v1.AnalyticsService/BootstrapStatsig";
 const AGENT_RETRIES_GATE: &str = "nal_agent_retries";
+const LOCAL_LOOP_GATE: &str = "agent_host_local_loop";
 const LOCAL_RULE: &str = "local_enabled";
 
 #[derive(Clone, PartialEq, Message)]
@@ -98,6 +99,7 @@ fn local_response() -> Result<Response<Body>> {
 
 fn enable_agent_retries(config: &mut Value) -> Result<()> {
     let gate_key = statsig_key(config, AGENT_RETRIES_GATE);
+    let local_loop_key = statsig_key(config, LOCAL_LOOP_GATE);
     let root = config
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig bootstrap config must be an object".into()))?;
@@ -107,6 +109,9 @@ fn enable_agent_retries(config: &mut Value) -> Result<()> {
         .as_object_mut()
         .ok_or_else(|| Error::Protocol("Statsig feature_gates must be an object".into()))?;
     gates.insert(gate_key.clone(), enabled_gate(&gate_key));
+    let mut local_loop = enabled_gate(&local_loop_key);
+    local_loop["value"] = Value::Bool(false);
+    gates.insert(local_loop_key, local_loop);
     Ok(())
 }
 
@@ -173,4 +178,22 @@ fn encode_unary(message: &impl Message, framed: bool) -> Bytes {
     output.put_u32(payload.len() as u32);
     output.extend_from_slice(&payload);
     output.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disables_incompatible_local_loop_for_all_bootstrap_hash_formats() {
+        for hash in ["none", "djb2", "sha256"] {
+            let mut config = json!({"hash_used": hash, "feature_gates": {}});
+            let local_loop_key = statsig_key(&config, LOCAL_LOOP_GATE);
+            let retries_key = statsig_key(&config, AGENT_RETRIES_GATE);
+            config["feature_gates"][&local_loop_key] = json!({"value": true});
+            enable_agent_retries(&mut config).unwrap();
+            assert_eq!(config["feature_gates"][&local_loop_key]["value"], false);
+            assert_eq!(config["feature_gates"][&retries_key]["value"], true);
+        }
+    }
 }
